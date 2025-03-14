@@ -141,7 +141,7 @@ object GroupProject_sjacob41 {
       repairedDataframe = fillInBlanks_Double(element, repairedDataframe)
     }
 
-    println("\nafter double repair in rows 6 thru 19, 37 thru 42")
+    println("\nAfter double repair in rows 6 thru 19, 37 thru 42")
     val healthyDfSummary2 = repairedDataframe.summary()
     healthyDfSummary2.foreach(println)
 
@@ -160,7 +160,7 @@ object GroupProject_sjacob41 {
         (colNotDetectedCount, colDetectedCount, if(isNDLarger) "not_detected" else "detected")
       }
       val lastTuple = tuple.collect().last
-      println("tuple for index[" + index + " is " + lastTuple)
+      //println("tuple for index[" + index + " is " + lastTuple)
 
       val healthWithValueDf = frame.withColumn(healthyColumns(index)._1,
         when(col(healthyColumns(index)._1).isNull, lastTuple._3).otherwise(col(healthyColumns(index)._1)))
@@ -174,11 +174,47 @@ object GroupProject_sjacob41 {
       repairedDataframe = fillInBlanks_String(element, repairedDataframe)
     }
 
-    println("\nafter string repair in rows 20 thru 36")
+    println("\nAfter string repair in rows 20 thru 36")
     val healthyDfSummary3 = repairedDataframe.summary()
     healthyDfSummary3.foreach(println)
 
+    // Drop three remaining rows that just dont have enough data to duplicate
+    repairedDataframe = repairedDataframe.drop("Influenza B, rapid test")
+    repairedDataframe = repairedDataframe.drop("Influenza A, rapid test")
+    repairedDataframe = repairedDataframe.drop("Strepto A")
+    var healthyColDrop = healthyColumns.filterNot(array => array._1.equals("Influenza B, rapid test"))
+    healthyColDrop = healthyColDrop.filterNot(array => array._1.equals("Influenza A, rapid test"))
+    healthyColDrop = healthyColDrop.filterNot(array => array._1.equals("Strepto A"))
+    healthyColDrop = healthyColDrop.filterNot(array => array._1.equals("Patient ID"))
 
+    // Map the "detected" value to 1 and "not_detected" value to 0
+    val strColumns = healthyColDrop.filter( array => array._2.equals("StringType"))
+    for(strLabel <- strColumns) {
+
+      repairedDataframe = repairedDataframe.withColumn(strLabel._1,
+        when(col(strLabel._1).equalTo("detected"), 1.0).otherwise(col(strLabel._1)))
+      repairedDataframe = repairedDataframe.withColumn(strLabel._1,
+        when(col(strLabel._1).equalTo("not_detected"), 0.0).otherwise(col(strLabel._1)))
+      repairedDataframe = repairedDataframe.withColumn(strLabel._1,
+        when(col(strLabel._1).equalTo("positive"), 1.0).otherwise(col(strLabel._1)))
+      repairedDataframe = repairedDataframe.withColumn(strLabel._1,
+        when(col(strLabel._1).equalTo("negative"), 0.0).otherwise(col(strLabel._1)))
+      repairedDataframe = repairedDataframe.withColumn(strLabel._1, col(strLabel._1).cast("Double"))
+    }
+
+    // Review the dataset to see how it looks
+    repairedDataframe.take(20).foreach(println)
+
+    // The data looks viable here. Let's trim off the non trainable attributes and setup our label
+    repairedDataframe = repairedDataframe.drop("Patient ID")
+    repairedDataframe = repairedDataframe.drop("Patient addmited to regular ward (1=yes, 0=no)")
+    repairedDataframe = repairedDataframe.drop("Patient addmited to semi-intensive unit (1=yes, 0=no)")
+    repairedDataframe = repairedDataframe.drop("Patient addmited to intensive care unit (1=yes, 0=no)")
+
+    // Review the dataset to see how it looks
+    repairedDataframe.take(20).foreach(println)
+
+    // SMJ - turn it into an RDD, pull out the SARS result field and make that a label
 
 
     // Restore INFO level verbosity so we can get time duration for the total run
