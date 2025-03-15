@@ -254,171 +254,76 @@ object GroupProject_sjacob41 {
     val labelSummary = testDataset.map(aLine => aLine.label).countByValue()
     labelSummary.foreach(println)
 
+    // Create a common dataset for analysis that we will use repeatedly for equal comparison
+    // across the different algorithms
+    val Array(trainData, testData) = testDataset.randomSplit(Array(0.6, 0.4))
+    trainData.cache()
+    testData.cache()
+
+    // Common method for evaluating binary metrics
+    def evaluateBinaryMetrics(data: RDD[(Double, Double)]): Unit = {
+
+      val metrics = new BinaryClassificationMetrics(data)
+      println("Area under ROC = " + metrics.areaUnderROC())
+      val metricsSum = metrics.scoreAndLabels.map(aRow => aRow.toString).countByValue()
+      metricsSum.foreach(println)
+
+      var (correct, incorrect) = (0.0, 0.0)
+      for ((key, value) <- metricsSum) {
+        correct = correct + (if (key.equals("(1.0,1.0)") || key.equals("(0.0,0.0)")) value else 0.0)
+        incorrect = incorrect + (if (key.equals("(0.0,1.0)") || key.equals("(1.0,0.0)")) value else 0.0)
+      }
+      println("Predictions correct [" + correct + "] incorrect[" + incorrect + "]")
+      println("Accuracy = " + (correct / (correct + incorrect)))
+    }
+
     println
     println("*************************************************")
     println("** DECISION TREE ANALYSIS                      **")
     println("*************************************************")
 
-    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
-    // Cache saves the RDD at the default storage level, which is to memory
-    val Array(trainData, cvData, testData) = testDataset.randomSplit(Array(0.7, 0.2, 0.1))
-    trainData.cache()
-    cvData.cache()
-    testData.cache()
-
-    // Function declaration to determine metrics from the trained model for a given data
-    // set.  We will use this after training the model to see how well it works predicting
-    // results for a new data set
-    def getMetrics(model: DecisionTreeModel, data: RDD[LabeledPoint]):
-    MulticlassMetrics = {
-      val predictionsAndLabels = data.map(example =>
-        (model.predict(example.features), example.label)
-      )
-      new MulticlassMetrics(predictionsAndLabels)
-    }
-
-    // Train the model with the training data from our original dataset.  Hyper
-    // parameters designate how we want drive the model design with depth and classifiers
-    val model = DecisionTree.trainClassifier(
+    // Train the model with our training data portion
+    val modelDT = DecisionTree.trainClassifier(
       trainData, 2, Map[Int, Int](), "gini", 4, 100)
 
-    // Use of function declaration above to get the predict metrics from our cross validation
-    // portion of the original dataset
-    val cvMetrics = getMetrics(model, cvData)
-
-    // Output the precision values for each class from the cvData
-    for (i <- 0 to 1) {
-      println("MulticlassMetrics (cvData): precision of label(" + i + ") = " + cvMetrics.precision(i.toDouble))
-    }
-
-    // Print the overall accuracy and weighted precision from the cvData
-    println("MulticlassMetrics (cvData): accuracy of model = " + cvMetrics.accuracy)
-    println("MulticlassMetrics (cvData): weighted precision of model = " + cvMetrics.weightedPrecision)
-    println
-
-    // Run the model with the test data also since we have it and see if there is
-    // any significant variance from the results of the cvData
-    val testMetrics = getMetrics(model, testData)
-    for (i <- 0 to 1) {
-      println("MulticlassMetrics (testData): precision of label(" + i + ") = " + testMetrics.precision(i.toDouble))
-    }
-    println("MulticlassMetrics (testData): accuracy of model = " + testMetrics.accuracy)
-    println("MulticlassMetrics (testData): weighted precision of model = " + testMetrics.weightedPrecision)
-    println
+    val predictionsDT = testData.map { point => (modelDT.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsDT)
 
     println
     println("*************************************************")
     println("** LOGISTIC REGRESSION ANALYSIS                **")
     println("*************************************************")
 
-    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
-    // Cache saves the RDD at the default storage level, which is to memory
-    val Array(trainDataLR, testDataLR) = testDataset.randomSplit(Array(0.6, 0.4))
-    trainDataLR.cache()
-    testDataLR.cache()
-
-    // Train the model with the training data from our original dataset.  Hyper
-    // parameters designate how we want drive the model design with depth and classifiers
-    val modelLR = new LogisticRegressionWithLBFGS().run(trainDataLR)
-    //val modelLR = SVMWithSGD.train(trainDataLR, 100)
-    //modelLR.clearThreshold()
-
-    // Make predictions on the test set
-    val predictionsLabelsMatches = testDataLR.map { point =>
-      val prediction = modelLR.predict(point.features)
-      val correct = (prediction == point.label)
-      //println("pred=" + prediction + " label=" + point.label + " correct=" + correct)
-      (prediction, point.label, correct)
-    }
-
-    // Print our correct and incorrect test data counts
-    val results = predictionsLabelsMatches.map { row => row._3 }.countByValue()
-    val correct = anyToDouble(results.getOrElse(true, 0)).getOrElse(0.0)
-    val incorrect = anyToDouble(results.getOrElse(false, 0)).getOrElse(0.0)
-    println("Predictions correct [" + correct + "] incorrect[" + incorrect + "]")
-    println("Accuracy = " + (correct / (correct + incorrect)))
-
-    // Evaluate the model
-    val predictionAndLabels = predictionsLabelsMatches.map { row => (row._1, row._2)}
-    val metrics = new BinaryClassificationMetrics(predictionAndLabels)
-    val auROC = metrics.areaUnderROC()
-    println(s"Area under ROC = $auROC")
+    // Train the logistic regression model with the training data from our original dataset.
+    val modelLR = new LogisticRegressionWithLBFGS().run(trainData)
+    val predictionsLR = testData.map { point => (modelLR.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsLR)
 
     println
     println("*************************************************")
     println("** RANDOM FOREST ANALYSIS                      **")
     println("*************************************************")
 
-    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
-    // Cache saves the RDD at the default storage level, which is to memory
-    val Array(trainDataRF, testDataRF) = testDataset.randomSplit(Array(0.6, 0.4))
-    trainDataRF.cache()
-    testDataRF.cache()
+    // Train the random forest model with the training data from our original dataset.
+    val modelRF = RandomForest.trainClassifier(trainData, 2, Map[Int, Int](),
+      2, "auto", "gini", 5, 32, 11)
 
-    // Train the model with the training data from our original dataset.  Hyper
-    // parameters designate how we want drive the model design with depth and classifiers
-    // Train a RandomForest model.
-    val modelRF = RandomForest.trainClassifier(trainDataRF, 2, Map[Int, Int](),
-      10, "auto", "gini", 5, 32, 11)
-
-    // Make predictions on the test set
-    val predictionsLabelsMatchesRF = testDataLR.map { point =>
-      val prediction = modelRF.predict(point.features)
-      val correct = (prediction == point.label)
-      //println("pred=" + prediction + " label=" + point.label + " correct=" + correct)
-      (prediction, point.label, correct)
-    }
-
-    // Print our correct and incorrect test data counts
-    val resultsRF = predictionsLabelsMatchesRF.map { row => row._3 }.countByValue()
-    val correctRF = anyToDouble(resultsRF.getOrElse(true, 0)).getOrElse(0.0)
-    val incorrectRF = anyToDouble(resultsRF.getOrElse(false, 0)).getOrElse(0.0)
-    println("Predictions correct [" + correctRF + "] incorrect[" + incorrectRF + "]")
-    println("Accuracy = " + (correctRF / (correctRF + incorrectRF)))
-
-    // Evaluate the model
-    val predictionAndLabelsRF = predictionsLabelsMatchesRF.map { row => (row._1, row._2) }
-    val metricsRF = new BinaryClassificationMetrics(predictionAndLabelsRF)
-    val auROCRF = metricsRF.areaUnderROC()
-    println(s"Area under ROC = $auROCRF")
+    val predictionsRF = testData.map { point => (modelRF.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsRF)
 
     println
     println("*************************************************")
     println("** GRADIENT BOOSTED TREE ANALYSIS              **")
     println("*************************************************")
 
-    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
-    // Cache saves the RDD at the default storage level, which is to memory
-    val Array(trainDataGBT, testDataGBT) = testDataset.randomSplit(Array(0.6, 0.4))
-    trainDataGBT.cache()
-    testDataGBT.cache()
-
-    // Train a GradientBoostedTrees model.
+    // Train a GradientBoostedTrees model with the training data from our original dataset.
     val boostingStrategy = BoostingStrategy.defaultParams("Classification")
     boostingStrategy.numIterations = 10 // Number of iterations (trees)
     boostingStrategy.treeStrategy.maxDepth = 5 // Maximum depth of each tree
-    val modelGBT = GradientBoostedTrees.train(trainDataGBT, boostingStrategy)
 
-    // Make predictions on the test set
-    val predictionsLabelsMatchesGBT = testDataGBT.map { point =>
-      val prediction = modelGBT.predict(point.features)
-      val correct = (prediction == point.label)
-      //println("pred=" + prediction + " label=" + point.label + " correct=" + correct)
-      (prediction, point.label, correct)
-    }
-
-    // Print our correct and incorrect test data counts
-    val resultsGBT = predictionsLabelsMatchesGBT.map { row => row._3 }.countByValue()
-    val correctGBT = anyToDouble(resultsGBT.getOrElse(true, 0)).getOrElse(0.0)
-    val incorrectGBT = anyToDouble(resultsGBT.getOrElse(false, 0)).getOrElse(0.0)
-    println("Predictions correct [" + correctGBT + "] incorrect[" + incorrectGBT + "]")
-    println("Accuracy = " + (correctGBT / (correctGBT + incorrectGBT)))
-
-    // Evaluate the model
-    val predictionAndLabelsGBT = predictionsLabelsMatchesGBT.map { row => (row._1, row._2) }
-    val metricsGBT = new BinaryClassificationMetrics(predictionAndLabelsGBT)
-    val auROCGBT = metricsGBT.areaUnderROC()
-    println(s"Area under ROC = $auROCGBT")
+    val modelGBT = GradientBoostedTrees.train(trainData, boostingStrategy)
+    val predictionsGBT = testData.map { point => (modelGBT.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsGBT)
 
     // Restore INFO level verbosity so we can get time duration for the total run
     spark.sparkContext.setLogLevel("INFO")
