@@ -1,7 +1,18 @@
 package com.cs7265.homework
 
-import org.apache.spark.sql.{SparkSession, DataFrame, Row}
+import org.apache.spark.ml.classification.{LogisticRegression, RandomForestClassifier}
+import org.apache.spark.mllib.classification.{LogisticRegressionWithLBFGS, SVMWithSGD}
+import org.apache.spark.mllib.evaluation.{BinaryClassificationMetrics, MulticlassMetrics}
+import org.apache.spark.mllib.linalg.Vectors
+import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.tree.configuration.BoostingStrategy
+import org.apache.spark.mllib.tree.{DecisionTree, GradientBoostedTrees, RandomForest}
+import org.apache.spark.mllib.tree.model.DecisionTreeModel
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
+
+import scala.math.Numeric.Implicits.infixNumericOps
 
 object GroupProject_sjacob41 {
 
@@ -41,6 +52,7 @@ object GroupProject_sjacob41 {
     dsTrim2 = dsTrim2.withColumn(labelName, col(labelName).cast("Double"))
 
     // Get a summary to determine how sparsely the table is populated
+    println("\nInitial data summary")
     val dsSummary = dsTrim2.summary()
     dsSummary.foreach(println)
 
@@ -52,15 +64,15 @@ object GroupProject_sjacob41 {
       // Drop any columns that are less than 5% populated
       if (colDataCountArr(i) < dsTrim2.count()*0.05)
       {
-          println("Drop column " + dsSummary.schema.fields(i+1).name + " with count = " + colDataCountArr(i))
+          //println("Drop column " + dsSummary.schema.fields(i+1).name + " with count = " + colDataCountArr(i))
           dsTrim2 = dsTrim2.drop(dsSummary.schema.fields(i+1).name)
       }
     }
 
     // Get a new summary to determine how sparsely the table is populated
-    println("\nDataset summary after dropping sparse columns")
-    val dsSummary2 = dsTrim2.summary()
-    dsSummary2.foreach(println)
+    //println("\nDataset summary after dropping sparse columns")
+    //val dsSummary2 = dsTrim2.summary()
+    //dsSummary2.foreach(println)
 
     // Determine which rows are sparsely populated by creating an array with row id and null count
     val dsTrimRDD = dsTrim2.rdd
@@ -82,7 +94,7 @@ object GroupProject_sjacob41 {
 
     //println("\nHealthy remaining rows - top 10")
     //healthyIdsOnly.take(10).foreach(println)
-    println("Total healthy rows = " + healthyIdsOnly.count())
+    //println("Total healthy rows = " + healthyIdsOnly.count())
 
     // Filter out just the healthy rows from our data set, this will get rid of the sparse ones
     val healthyPopulatedRows = healthyIdsOnly.collect().toSet
@@ -96,13 +108,13 @@ object GroupProject_sjacob41 {
     //println(dsTrimHealthy.first().schema)
     val healthyDf = spark.createDataFrame(dsTrimHealthy, dsTrimHealthy.first().schema)
 
-    println("\nDataset summary after dropping sparse rows")
-    val healthyDfSummary = healthyDf.summary()
-    healthyDfSummary.foreach(println)
+    //println("\nDataset summary after dropping sparse rows")
+    //val healthyDfSummary = healthyDf.summary()
+    //healthyDfSummary.foreach(println)
 
     // Get the header names and types so we can start repairing the missing data
     val healthyColumns = healthyDf.dtypes
-    healthyColumns.foreach(println)
+    //healthyColumns.foreach(println)
 
     // Custom function that will look at a given column where data is type Double, determine
     // the average value for the non null data in the column, then fill in the blanks based
@@ -141,9 +153,9 @@ object GroupProject_sjacob41 {
       repairedDataframe = fillInBlanks_Double(element, repairedDataframe)
     }
 
-    println("\nAfter double repair in rows 6 thru 19, 37 thru 42")
-    val healthyDfSummary2 = repairedDataframe.summary()
-    healthyDfSummary2.foreach(println)
+    //println("\nAfter double repair in rows 6 thru 19, 37 thru 42")
+    //val healthyDfSummary2 = repairedDataframe.summary()
+    //healthyDfSummary2.foreach(println)
 
     // Custom function that will look at a given column where data is an enumerated String,
     // determine the most used value for the non null data in the column, then fill in the
@@ -174,9 +186,9 @@ object GroupProject_sjacob41 {
       repairedDataframe = fillInBlanks_String(element, repairedDataframe)
     }
 
-    println("\nAfter string repair in rows 20 thru 36")
-    val healthyDfSummary3 = repairedDataframe.summary()
-    healthyDfSummary3.foreach(println)
+    //println("\nAfter string repair in rows 20 thru 36")
+    //val healthyDfSummary3 = repairedDataframe.summary()
+    //healthyDfSummary3.foreach(println)
 
     // Drop three remaining rows that just dont have enough data to duplicate
     repairedDataframe = repairedDataframe.drop("Influenza B, rapid test")
@@ -203,7 +215,7 @@ object GroupProject_sjacob41 {
     }
 
     // Review the dataset to see how it looks
-    repairedDataframe.take(20).foreach(println)
+    //repairedDataframe.take(20).foreach(println)
 
     // The data looks viable here. Let's trim off the non trainable attributes and setup our label
     repairedDataframe = repairedDataframe.drop("Patient ID")
@@ -212,10 +224,201 @@ object GroupProject_sjacob41 {
     repairedDataframe = repairedDataframe.drop("Patient addmited to intensive care unit (1=yes, 0=no)")
 
     // Review the dataset to see how it looks
-    repairedDataframe.take(20).foreach(println)
+    //repairedDataframe.take(20).foreach(println)
 
-    // SMJ - turn it into an RDD, pull out the SARS result field and make that a label
+    def anyToDouble(value: Any): Option[Double] = {
+      value match {
+        case d: Double => Some(d)
+        case i: Int => Some(i.toDouble)
+        case l: Long => Some(l.toDouble)
+        case f: Float => Some(f.toDouble)
+        case _ => None // Return None for other types
+      }
+    }
 
+    // Convert our data into an RDD with LabeledPoints so we can start to analyze
+    val finalDataRdd = repairedDataframe.rdd
+    val testDataset = finalDataRdd.map { aRow =>
+      val defaultDouble = 0.0
+      val label = anyToDouble(aRow.get(1)).getOrElse(defaultDouble)
+      val rowList = aRow.toSeq.zipWithIndex.filter(_._2 != 1).map(_._1)
+      val rowDoubles = rowList.map( value => anyToDouble(value).getOrElse(defaultDouble))
+
+      LabeledPoint(label, Vectors.dense(rowDoubles.toArray))
+    }
+
+    println("\nLabeled rows ready to analyze")
+    testDataset.take(10).foreach(println)
+
+    println("\nLabel ratios from the prepared data")
+    val labelSummary = testDataset.map(aLine => aLine.label).countByValue()
+    labelSummary.foreach(println)
+
+    println
+    println("*************************************************")
+    println("** DECISION TREE ANALYSIS                      **")
+    println("*************************************************")
+
+    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
+    // Cache saves the RDD at the default storage level, which is to memory
+    val Array(trainData, cvData, testData) = testDataset.randomSplit(Array(0.7, 0.2, 0.1))
+    trainData.cache()
+    cvData.cache()
+    testData.cache()
+
+    // Function declaration to determine metrics from the trained model for a given data
+    // set.  We will use this after training the model to see how well it works predicting
+    // results for a new data set
+    def getMetrics(model: DecisionTreeModel, data: RDD[LabeledPoint]):
+    MulticlassMetrics = {
+      val predictionsAndLabels = data.map(example =>
+        (model.predict(example.features), example.label)
+      )
+      new MulticlassMetrics(predictionsAndLabels)
+    }
+
+    // Train the model with the training data from our original dataset.  Hyper
+    // parameters designate how we want drive the model design with depth and classifiers
+    val model = DecisionTree.trainClassifier(
+      trainData, 2, Map[Int, Int](), "gini", 4, 100)
+
+    // Use of function declaration above to get the predict metrics from our cross validation
+    // portion of the original dataset
+    val cvMetrics = getMetrics(model, cvData)
+
+    // Output the precision values for each class from the cvData
+    for (i <- 0 to 1) {
+      println("MulticlassMetrics (cvData): precision of label(" + i + ") = " + cvMetrics.precision(i.toDouble))
+    }
+
+    // Print the overall accuracy and weighted precision from the cvData
+    println("MulticlassMetrics (cvData): accuracy of model = " + cvMetrics.accuracy)
+    println("MulticlassMetrics (cvData): weighted precision of model = " + cvMetrics.weightedPrecision)
+    println
+
+    // Run the model with the test data also since we have it and see if there is
+    // any significant variance from the results of the cvData
+    val testMetrics = getMetrics(model, testData)
+    for (i <- 0 to 1) {
+      println("MulticlassMetrics (testData): precision of label(" + i + ") = " + testMetrics.precision(i.toDouble))
+    }
+    println("MulticlassMetrics (testData): accuracy of model = " + testMetrics.accuracy)
+    println("MulticlassMetrics (testData): weighted precision of model = " + testMetrics.weightedPrecision)
+    println
+
+    println
+    println("*************************************************")
+    println("** LOGISTIC REGRESSION ANALYSIS                **")
+    println("*************************************************")
+
+    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
+    // Cache saves the RDD at the default storage level, which is to memory
+    val Array(trainDataLR, testDataLR) = testDataset.randomSplit(Array(0.6, 0.4))
+    trainDataLR.cache()
+    testDataLR.cache()
+
+    // Train the model with the training data from our original dataset.  Hyper
+    // parameters designate how we want drive the model design with depth and classifiers
+    val modelLR = new LogisticRegressionWithLBFGS().run(trainDataLR)
+    //val modelLR = SVMWithSGD.train(trainDataLR, 100)
+    //modelLR.clearThreshold()
+
+    // Make predictions on the test set
+    val predictionsLabelsMatches = testDataLR.map { point =>
+      val prediction = modelLR.predict(point.features)
+      val correct = (prediction == point.label)
+      //println("pred=" + prediction + " label=" + point.label + " correct=" + correct)
+      (prediction, point.label, correct)
+    }
+
+    // Print our correct and incorrect test data counts
+    val results = predictionsLabelsMatches.map { row => row._3 }.countByValue()
+    val correct = anyToDouble(results.getOrElse(true, 0)).getOrElse(0.0)
+    val incorrect = anyToDouble(results.getOrElse(false, 0)).getOrElse(0.0)
+    println("Predictions correct [" + correct + "] incorrect[" + incorrect + "]")
+    println("Accuracy = " + (correct / (correct + incorrect)))
+
+    // Evaluate the model
+    val predictionAndLabels = predictionsLabelsMatches.map { row => (row._1, row._2)}
+    val metrics = new BinaryClassificationMetrics(predictionAndLabels)
+    val auROC = metrics.areaUnderROC()
+    println(s"Area under ROC = $auROC")
+
+    println
+    println("*************************************************")
+    println("** RANDOM FOREST ANALYSIS                      **")
+    println("*************************************************")
+
+    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
+    // Cache saves the RDD at the default storage level, which is to memory
+    val Array(trainDataRF, testDataRF) = testDataset.randomSplit(Array(0.6, 0.4))
+    trainDataRF.cache()
+    testDataRF.cache()
+
+    // Train the model with the training data from our original dataset.  Hyper
+    // parameters designate how we want drive the model design with depth and classifiers
+    // Train a RandomForest model.
+    val modelRF = RandomForest.trainClassifier(trainDataRF, 2, Map[Int, Int](),
+      10, "auto", "gini", 5, 32, 11)
+
+    // Make predictions on the test set
+    val predictionsLabelsMatchesRF = testDataLR.map { point =>
+      val prediction = modelRF.predict(point.features)
+      val correct = (prediction == point.label)
+      //println("pred=" + prediction + " label=" + point.label + " correct=" + correct)
+      (prediction, point.label, correct)
+    }
+
+    // Print our correct and incorrect test data counts
+    val resultsRF = predictionsLabelsMatchesRF.map { row => row._3 }.countByValue()
+    val correctRF = anyToDouble(resultsRF.getOrElse(true, 0)).getOrElse(0.0)
+    val incorrectRF = anyToDouble(resultsRF.getOrElse(false, 0)).getOrElse(0.0)
+    println("Predictions correct [" + correctRF + "] incorrect[" + incorrectRF + "]")
+    println("Accuracy = " + (correctRF / (correctRF + incorrectRF)))
+
+    // Evaluate the model
+    val predictionAndLabelsRF = predictionsLabelsMatchesRF.map { row => (row._1, row._2) }
+    val metricsRF = new BinaryClassificationMetrics(predictionAndLabelsRF)
+    val auROCRF = metricsRF.areaUnderROC()
+    println(s"Area under ROC = $auROCRF")
+
+    println
+    println("*************************************************")
+    println("** GRADIENT BOOSTED TREE ANALYSIS              **")
+    println("*************************************************")
+
+    // Randomly split the data into 80% training, 10% cross validation, 10% test data.
+    // Cache saves the RDD at the default storage level, which is to memory
+    val Array(trainDataGBT, testDataGBT) = testDataset.randomSplit(Array(0.6, 0.4))
+    trainDataGBT.cache()
+    testDataGBT.cache()
+
+    // Train a GradientBoostedTrees model.
+    val boostingStrategy = BoostingStrategy.defaultParams("Classification")
+    boostingStrategy.numIterations = 10 // Number of iterations (trees)
+    boostingStrategy.treeStrategy.maxDepth = 5 // Maximum depth of each tree
+    val modelGBT = GradientBoostedTrees.train(trainDataGBT, boostingStrategy)
+
+    // Make predictions on the test set
+    val predictionsLabelsMatchesGBT = testDataGBT.map { point =>
+      val prediction = modelGBT.predict(point.features)
+      val correct = (prediction == point.label)
+      //println("pred=" + prediction + " label=" + point.label + " correct=" + correct)
+      (prediction, point.label, correct)
+    }
+
+    // Print our correct and incorrect test data counts
+    val resultsGBT = predictionsLabelsMatchesGBT.map { row => row._3 }.countByValue()
+    val correctGBT = anyToDouble(resultsGBT.getOrElse(true, 0)).getOrElse(0.0)
+    val incorrectGBT = anyToDouble(resultsGBT.getOrElse(false, 0)).getOrElse(0.0)
+    println("Predictions correct [" + correctGBT + "] incorrect[" + incorrectGBT + "]")
+    println("Accuracy = " + (correctGBT / (correctGBT + incorrectGBT)))
+
+    // Evaluate the model
+    val predictionAndLabelsGBT = predictionsLabelsMatchesGBT.map { row => (row._1, row._2) }
+    val metricsGBT = new BinaryClassificationMetrics(predictionAndLabelsGBT)
+    val auROCGBT = metricsGBT.areaUnderROC()
+    println(s"Area under ROC = $auROCGBT")
 
     // Restore INFO level verbosity so we can get time duration for the total run
     spark.sparkContext.setLogLevel("INFO")
