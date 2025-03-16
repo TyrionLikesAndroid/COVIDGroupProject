@@ -391,7 +391,7 @@ object GroupProject_sjacob41 {
 
     println
     println("*************************************************")
-    println("** GRADIENT BOOSTED TREE ANALYSIS              **")
+    println("** GRADIENT BOOSTED TREE ANALYSIS - NORM       **")
     println("*************************************************")
 
     // Train a GradientBoostedTrees model with the training data from our original dataset.
