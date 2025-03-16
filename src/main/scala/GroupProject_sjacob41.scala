@@ -1,18 +1,14 @@
 package com.cs7265.homework
 
-import org.apache.spark.ml.classification.{LogisticRegression, RandomForestClassifier}
 import org.apache.spark.mllib.classification.{LogisticRegressionWithLBFGS, SVMWithSGD}
-import org.apache.spark.mllib.evaluation.{BinaryClassificationMetrics, MulticlassMetrics}
+import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
 import org.apache.spark.mllib.linalg.Vectors
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.mllib.tree.configuration.BoostingStrategy
 import org.apache.spark.mllib.tree.{DecisionTree, GradientBoostedTrees, RandomForest}
-import org.apache.spark.mllib.tree.model.DecisionTreeModel
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
-
-import scala.math.Numeric.Implicits.infixNumericOps
 
 object GroupProject_sjacob41 {
 
@@ -214,6 +210,9 @@ object GroupProject_sjacob41 {
       repairedDataframe = repairedDataframe.withColumn(strLabel._1, col(strLabel._1).cast("Double"))
     }
 
+    //SMJ Note - Comment out above for loop and comment in the line below to drop the string attributes
+    //for (strLabel <- strColumns) { repairedDataframe = repairedDataframe.drop(strLabel._1) }
+
     // Review the dataset to see how it looks
     //repairedDataframe.take(20).foreach(println)
 
@@ -256,7 +255,7 @@ object GroupProject_sjacob41 {
 
     // Create a common dataset for analysis that we will use repeatedly for equal comparison
     // across the different algorithms
-    val Array(trainData, testData) = testDataset.randomSplit(Array(0.6, 0.4))
+    val Array(trainData, testData) = testDataset.randomSplit(Array(0.60, 0.40))
     trainData.cache()
     testData.cache()
 
@@ -324,6 +323,81 @@ object GroupProject_sjacob41 {
     val modelGBT = GradientBoostedTrees.train(trainData, boostingStrategy)
     val predictionsGBT = testData.map { point => (modelGBT.predict(point.features), point.label) }
     evaluateBinaryMetrics(predictionsGBT)
+
+    println
+    println("*************************************************")
+    println("** SUPPORT VECTOR MACHINE ANALYSIS             **")
+    println("*************************************************")
+
+    // Train a SVN model with the training data from our original dataset.
+    val modelSVM = SVMWithSGD.train(trainData, 100)
+    val predictionsSVM = testData.map { point => (modelSVM.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsSVM)
+
+    println
+    println("*************************************************")
+    println("** SMJ IMPROVEMENT ANALYSIS                    **")
+    println("*************************************************")
+
+    def normalizeData(notNormData: RDD[LabeledPoint]): RDD[LabeledPoint] = {
+
+      // Normalize the dataset and see what changes
+      val numAttribs = notNormData.first().features.size
+      val featureValues = (0 until numAttribs).map { featureIndex =>
+        notNormData.map(_.features(featureIndex))
+      }
+
+      val minMaxValues = featureValues.map { values =>
+        (values.min(), values.max())
+      }
+
+      val normalizedTrainData = notNormData.map { lp =>
+        val normalizedFeatures = (0 until numAttribs).map { featureIndex =>
+          val originalFeature = lp.features(featureIndex)
+          val (min, max) = minMaxValues(featureIndex)
+          if (max == min) 0.0 else (originalFeature - min) / (max - min)
+        }.toArray
+
+        LabeledPoint(lp.label, Vectors.dense(normalizedFeatures))
+      }
+      normalizedTrainData
+    }
+
+    val normTrainData = normalizeData(trainData)
+    val normTestData = normalizeData(testData)
+    normTestData.take(10).foreach(println)
+
+    println
+    println("*************************************************")
+    println("** LOGISTIC REGRESSION ANALYSIS - NORM         **")
+    println("*************************************************")
+
+    // Train the logistic regression model with the training data from our original dataset.
+    val modelLR_N = new LogisticRegressionWithLBFGS().run(normTrainData)
+    val predictionsLR_N = normTestData.map { point => (modelLR_N.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsLR_N)
+
+    println
+    println("*************************************************")
+    println("** RANDOM FOREST ANALYSIS - NORM               **")
+    println("*************************************************")
+
+    // Train the random forest model with the training data from our original dataset.
+    val modelRF_N = RandomForest.trainClassifier(normTrainData, 2, Map[Int, Int](),
+      2, "auto", "gini", 5, 32, 11)
+
+    val predictionsRF_N = normTestData.map { point => (modelRF_N.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsRF_N)
+
+    println
+    println("*************************************************")
+    println("** GRADIENT BOOSTED TREE ANALYSIS              **")
+    println("*************************************************")
+
+    // Train a GradientBoostedTrees model with the training data from our original dataset.
+    val modelGBT_N = GradientBoostedTrees.train(normTrainData, boostingStrategy)
+    val predictionsGBT_N = normTestData.map { point => (modelGBT_N.predict(point.features), point.label) }
+    evaluateBinaryMetrics(predictionsGBT_N)
 
     // Restore INFO level verbosity so we can get time duration for the total run
     spark.sparkContext.setLogLevel("INFO")
