@@ -253,151 +253,173 @@ object GroupProject_sjacob41 {
     val labelSummary = testDataset.map(aLine => aLine.label).countByValue()
     labelSummary.foreach(println)
 
-    // Create a common dataset for analysis that we will use repeatedly for equal comparison
-    // across the different algorithms
-    val Array(trainData, testData) = testDataset.randomSplit(Array(0.60, 0.40))
-    trainData.cache()
-    testData.cache()
+    // create our output list.  We will add to this after each test for each iteration
+    var outputList: List[(Int, String, Double, Double, Double, Double, Double)] = List()
 
-    // Common method for evaluating binary metrics
-    def evaluateBinaryMetrics(data: RDD[(Double, Double)]): Unit = {
+    // Make a test loop so we can do bulk test runs with multiple random samples and then
+    // average them together for the final solution
+    for(iteration <- 1 to 30) {
 
-      val metrics = new BinaryClassificationMetrics(data)
-      println("Area under ROC = " + metrics.areaUnderROC())
-      val metricsSum = metrics.scoreAndLabels.map(aRow => aRow.toString).countByValue()
-      metricsSum.foreach(println)
+      // Create a common dataset for analysis that we will use repeatedly for equal comparison
+      // across the different algorithms
+      val Array(trainData, testData) = testDataset.randomSplit(Array(0.60, 0.40))
+      trainData.cache()
+      testData.cache()
 
-      var (correct, incorrect) = (0.0, 0.0)
-      for ((key, value) <- metricsSum) {
-        correct = correct + (if (key.equals("(1.0,1.0)") || key.equals("(0.0,0.0)")) value else 0.0)
-        incorrect = incorrect + (if (key.equals("(0.0,1.0)") || key.equals("(1.0,0.0)")) value else 0.0)
+      // Common method for evaluating binary metrics
+      def evaluateBinaryMetrics(test: String, data: RDD[(Double, Double)]): Unit = {
+
+        val metrics = new BinaryClassificationMetrics(data)
+        println("Area under ROC = " + metrics.areaUnderROC())
+
+        val metricsSum = metrics.scoreAndLabels.map(aRow => aRow.toString).countByValue()
+        metricsSum.foreach(println)
+
+        val confusion_1_0 = anyToDouble(metricsSum.getOrElse("(1.0,0.0)", 0.0)).getOrElse(0.0)
+        val confusion_1_1 = anyToDouble(metricsSum.getOrElse("(1.0,1.0)", 0.0)).getOrElse(0.0)
+        val confusion_0_0 = anyToDouble(metricsSum.getOrElse("(0.0,0.0)", 0.0)).getOrElse(0.0)
+        val confusion_0_1 = anyToDouble(metricsSum.getOrElse("(0.0,1.0)", 0.0)).getOrElse(0.0)
+
+        var (correct, incorrect) = (0.0, 0.0)
+        for ((key, value) <- metricsSum) {
+          correct = correct + (if (key.equals("(1.0,1.0)") || key.equals("(0.0,0.0)")) value else 0.0)
+          incorrect = incorrect + (if (key.equals("(0.0,1.0)") || key.equals("(1.0,0.0)")) value else 0.0)
+        }
+        println("Predictions correct [" + correct + "] incorrect[" + incorrect + "]")
+        println("Accuracy = " + (correct / (correct + incorrect)))
+
+        val output = (iteration, test, confusion_1_0, confusion_0_0, confusion_1_1, confusion_0_1, metrics.areaUnderROC())
+        outputList = outputList :+ output
       }
-      println("Predictions correct [" + correct + "] incorrect[" + incorrect + "]")
-      println("Accuracy = " + (correct / (correct + incorrect)))
+
+      println
+      println("*************************************************")
+      println("** DECISION TREE ANALYSIS                      **")
+      println("*************************************************")
+
+      // Train the model with our training data portion
+      val modelDT = DecisionTree.trainClassifier(
+        trainData, 2, Map[Int, Int](), "gini", 4, 100)
+
+      val predictionsDT = testData.map { point => (modelDT.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Decision Tree", predictionsDT)
+
+      println
+      println("*************************************************")
+      println("** LOGISTIC REGRESSION ANALYSIS                **")
+      println("*************************************************")
+
+      // Train the logistic regression model with the training data from our original dataset.
+      val modelLR = new LogisticRegressionWithLBFGS().run(trainData)
+      val predictionsLR = testData.map { point => (modelLR.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Logistic Regression", predictionsLR)
+
+      println
+      println("*************************************************")
+      println("** RANDOM FOREST ANALYSIS                      **")
+      println("*************************************************")
+
+      // Train the random forest model with the training data from our original dataset.
+      val modelRF = RandomForest.trainClassifier(trainData, 2, Map[Int, Int](),
+        2, "auto", "gini", 5, 32, 11)
+
+      val predictionsRF = testData.map { point => (modelRF.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Random Forest", predictionsRF)
+
+      println
+      println("*************************************************")
+      println("** GRADIENT BOOSTED TREE ANALYSIS              **")
+      println("*************************************************")
+
+      // Train a GradientBoostedTrees model with the training data from our original dataset.
+      val boostingStrategy = BoostingStrategy.defaultParams("Classification")
+      boostingStrategy.numIterations = 10 // Number of iterations (trees)
+      boostingStrategy.treeStrategy.maxDepth = 5 // Maximum depth of each tree
+
+      val modelGBT = GradientBoostedTrees.train(trainData, boostingStrategy)
+      val predictionsGBT = testData.map { point => (modelGBT.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Gradient Boosted Tree", predictionsGBT)
+
+      println
+      println("*************************************************")
+      println("** SUPPORT VECTOR MACHINE ANALYSIS             **")
+      println("*************************************************")
+
+      // Train a SVN model with the training data from our original dataset.
+      val modelSVM = SVMWithSGD.train(trainData, 100)
+      val predictionsSVM = testData.map { point => (modelSVM.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Support Vector Machine", predictionsSVM)
+
+      println
+      println("*************************************************")
+      println("** SMJ IMPROVEMENT ANALYSIS                    **")
+      println("*************************************************")
+
+      def normalizeData(notNormData: RDD[LabeledPoint]): RDD[LabeledPoint] = {
+
+        // Normalize the dataset and see what changes
+        val numAttribs = notNormData.first().features.size
+        val featureValues = (0 until numAttribs).map { featureIndex =>
+          notNormData.map(_.features(featureIndex))
+        }
+
+        val minMaxValues = featureValues.map { values =>
+          (values.min(), values.max())
+        }
+
+        val normalizedTrainData = notNormData.map { lp =>
+          val normalizedFeatures = (0 until numAttribs).map { featureIndex =>
+            val originalFeature = lp.features(featureIndex)
+            val (min, max) = minMaxValues(featureIndex)
+            if (max == min) 0.0 else (originalFeature - min) / (max - min)
+          }.toArray
+
+          LabeledPoint(lp.label, Vectors.dense(normalizedFeatures))
+        }
+        normalizedTrainData
+      }
+
+      val normTrainData = normalizeData(trainData)
+      val normTestData = normalizeData(testData)
+      //normTestData.take(10).foreach(println)
+      normTrainData.cache()
+      normTestData.cache()
+
+      println
+      println("*************************************************")
+      println("** LOGISTIC REGRESSION ANALYSIS - NORM         **")
+      println("*************************************************")
+
+      // Train the logistic regression model with the training data from our original dataset.
+      val modelLR_N = new LogisticRegressionWithLBFGS().run(normTrainData)
+      val predictionsLR_N = normTestData.map { point => (modelLR_N.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Logistic Regression - Norm", predictionsLR_N)
+
+      println
+      println("*************************************************")
+      println("** RANDOM FOREST ANALYSIS - NORM               **")
+      println("*************************************************")
+
+      // Train the random forest model with the training data from our original dataset.
+      val modelRF_N = RandomForest.trainClassifier(normTrainData, 2, Map[Int, Int](),
+        2, "auto", "gini", 5, 32, 11)
+
+      val predictionsRF_N = normTestData.map { point => (modelRF_N.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Random Forest - Norm", predictionsRF_N)
+
+      println
+      println("*************************************************")
+      println("** GRADIENT BOOSTED TREE ANALYSIS - NORM       **")
+      println("*************************************************")
+
+      // Train a GradientBoostedTrees model with the training data from our original dataset.
+      val modelGBT_N = GradientBoostedTrees.train(normTrainData, boostingStrategy)
+      val predictionsGBT_N = normTestData.map { point => (modelGBT_N.predict(point.features), point.label) }
+      evaluateBinaryMetrics("Gradient Boosted Tree - Norm", predictionsGBT_N)
     }
 
-    println
-    println("*************************************************")
-    println("** DECISION TREE ANALYSIS                      **")
-    println("*************************************************")
-
-    // Train the model with our training data portion
-    val modelDT = DecisionTree.trainClassifier(
-      trainData, 2, Map[Int, Int](), "gini", 4, 100)
-
-    val predictionsDT = testData.map { point => (modelDT.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsDT)
-
-    println
-    println("*************************************************")
-    println("** LOGISTIC REGRESSION ANALYSIS                **")
-    println("*************************************************")
-
-    // Train the logistic regression model with the training data from our original dataset.
-    val modelLR = new LogisticRegressionWithLBFGS().run(trainData)
-    val predictionsLR = testData.map { point => (modelLR.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsLR)
-
-    println
-    println("*************************************************")
-    println("** RANDOM FOREST ANALYSIS                      **")
-    println("*************************************************")
-
-    // Train the random forest model with the training data from our original dataset.
-    val modelRF = RandomForest.trainClassifier(trainData, 2, Map[Int, Int](),
-      2, "auto", "gini", 5, 32, 11)
-
-    val predictionsRF = testData.map { point => (modelRF.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsRF)
-
-    println
-    println("*************************************************")
-    println("** GRADIENT BOOSTED TREE ANALYSIS              **")
-    println("*************************************************")
-
-    // Train a GradientBoostedTrees model with the training data from our original dataset.
-    val boostingStrategy = BoostingStrategy.defaultParams("Classification")
-    boostingStrategy.numIterations = 10 // Number of iterations (trees)
-    boostingStrategy.treeStrategy.maxDepth = 5 // Maximum depth of each tree
-
-    val modelGBT = GradientBoostedTrees.train(trainData, boostingStrategy)
-    val predictionsGBT = testData.map { point => (modelGBT.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsGBT)
-
-    println
-    println("*************************************************")
-    println("** SUPPORT VECTOR MACHINE ANALYSIS             **")
-    println("*************************************************")
-
-    // Train a SVN model with the training data from our original dataset.
-    val modelSVM = SVMWithSGD.train(trainData, 100)
-    val predictionsSVM = testData.map { point => (modelSVM.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsSVM)
-
-    println
-    println("*************************************************")
-    println("** SMJ IMPROVEMENT ANALYSIS                    **")
-    println("*************************************************")
-
-    def normalizeData(notNormData: RDD[LabeledPoint]): RDD[LabeledPoint] = {
-
-      // Normalize the dataset and see what changes
-      val numAttribs = notNormData.first().features.size
-      val featureValues = (0 until numAttribs).map { featureIndex =>
-        notNormData.map(_.features(featureIndex))
-      }
-
-      val minMaxValues = featureValues.map { values =>
-        (values.min(), values.max())
-      }
-
-      val normalizedTrainData = notNormData.map { lp =>
-        val normalizedFeatures = (0 until numAttribs).map { featureIndex =>
-          val originalFeature = lp.features(featureIndex)
-          val (min, max) = minMaxValues(featureIndex)
-          if (max == min) 0.0 else (originalFeature - min) / (max - min)
-        }.toArray
-
-        LabeledPoint(lp.label, Vectors.dense(normalizedFeatures))
-      }
-      normalizedTrainData
-    }
-
-    val normTrainData = normalizeData(trainData)
-    val normTestData = normalizeData(testData)
-    normTestData.take(10).foreach(println)
-
-    println
-    println("*************************************************")
-    println("** LOGISTIC REGRESSION ANALYSIS - NORM         **")
-    println("*************************************************")
-
-    // Train the logistic regression model with the training data from our original dataset.
-    val modelLR_N = new LogisticRegressionWithLBFGS().run(normTrainData)
-    val predictionsLR_N = normTestData.map { point => (modelLR_N.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsLR_N)
-
-    println
-    println("*************************************************")
-    println("** RANDOM FOREST ANALYSIS - NORM               **")
-    println("*************************************************")
-
-    // Train the random forest model with the training data from our original dataset.
-    val modelRF_N = RandomForest.trainClassifier(normTrainData, 2, Map[Int, Int](),
-      2, "auto", "gini", 5, 32, 11)
-
-    val predictionsRF_N = normTestData.map { point => (modelRF_N.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsRF_N)
-
-    println
-    println("*************************************************")
-    println("** GRADIENT BOOSTED TREE ANALYSIS - NORM       **")
-    println("*************************************************")
-
-    // Train a GradientBoostedTrees model with the training data from our original dataset.
-    val modelGBT_N = GradientBoostedTrees.train(normTrainData, boostingStrategy)
-    val predictionsGBT_N = normTestData.map { point => (modelGBT_N.predict(point.features), point.label) }
-    evaluateBinaryMetrics(predictionsGBT_N)
+    // Print the output matrix
+    outputList.foreach( aRow => println(aRow))
 
     // Restore INFO level verbosity so we can get time duration for the total run
     spark.sparkContext.setLogLevel("INFO")
