@@ -8,7 +8,7 @@ import org.apache.spark.sql.SparkSession
 
 object Assignment6 {
 
-  val spark: SparkSession = SparkSession.builder().appName("CS7265 Group Project")
+  val spark: SparkSession = SparkSession.builder().appName("CS7265 Assignment 6")
     .master("local").getOrCreate()
 
   def main(args: Array[String]): Unit = {
